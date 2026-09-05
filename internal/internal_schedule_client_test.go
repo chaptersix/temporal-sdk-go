@@ -4,10 +4,12 @@ import (
 	"context"
 	iconverter "go.temporal.io/sdk/internal/converter"
 	"testing"
+	"time"
 
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/suite"
 	commonpb "go.temporal.io/api/common/v1"
+	enumspb "go.temporal.io/api/enums/v1"
 	schedulepb "go.temporal.io/api/schedule/v1"
 	"go.temporal.io/api/serviceerror"
 	taskqueuepb "go.temporal.io/api/taskqueue/v1"
@@ -15,6 +17,7 @@ import (
 	"go.temporal.io/api/workflowservice/v1"
 	"go.temporal.io/api/workflowservicemock/v1"
 	"go.temporal.io/sdk/converter"
+	"google.golang.org/protobuf/types/known/durationpb"
 )
 
 const (
@@ -34,6 +37,124 @@ type (
 
 func TestScheduleClientSuite(t *testing.T) {
 	suite.Run(t, new(scheduleClientTestSuite))
+}
+
+func (s *scheduleClientTestSuite) TestCreateAndDescribeScheduleActivity() {
+	headerPayload, err := converter.GetDefaultDataConverter().ToPayload("header-value")
+	s.NoError(err)
+	options := ScheduleOptions{
+		ID:   scheduleID,
+		Spec: ScheduleSpec{CronExpressions: []string{"*"}},
+		Action: &ScheduleActivityAction{
+			ID: "activity-id", Activity: "activity-type", Args: []any{"argument"}, TaskQueue: taskqueue,
+			StartToCloseTimeout: time.Minute, HeartbeatTimeout: time.Second, StartDelay: 2 * time.Second,
+			StaticSummary: "summary", Priority: Priority{PriorityKey: 3},
+			Header:                &commonpb.Header{Fields: map[string]*commonpb.Payload{"header": headerPayload}},
+			TypedSearchAttributes: NewSearchAttributes(NewSearchAttributeKeyKeyword("CustomKeywordField").ValueSet("value")),
+		},
+		CustomOverlapPolicy: ScheduleOverlapPolicyBufferLatest,
+	}
+	s.service.EXPECT().CreateSchedule(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, request *workflowservice.CreateScheduleRequest, _ ...any) (*workflowservice.CreateScheduleResponse, error) {
+			s.Equal(ScheduleOverlapPolicyBufferLatest, request.Schedule.Policies.GetCustomOverlapPolicy().GetName())
+			activity := request.Schedule.Action.GetStartActivity()
+			s.Equal("activity-id", activity.GetActivityId())
+			s.Equal("activity-type", activity.GetActivityType().GetName())
+			s.Equal(taskqueue, activity.GetTaskQueue().GetName())
+			s.Equal(time.Minute, activity.GetStartToCloseTimeout().AsDuration())
+			s.Equal(time.Second, activity.GetHeartbeatTimeout().AsDuration())
+			s.Equal(2*time.Second, activity.GetStartDelay().AsDuration())
+			s.Equal(int32(3), activity.GetPriority().GetPriorityKey())
+			s.Equal(headerPayload, activity.GetHeader().GetFields()["header"])
+			s.Contains(activity.GetSearchAttributes().GetIndexedFields(), "CustomKeywordField")
+			var summary string
+			s.NoError(converter.GetDefaultDataConverter().FromPayload(activity.GetUserMetadata().GetSummary(), &summary))
+			s.Equal("summary", summary)
+			return &workflowservice.CreateScheduleResponse{}, nil
+		})
+
+	_, err = s.client.ScheduleClient().Create(context.Background(), options)
+	s.NoError(err)
+}
+
+func (s *scheduleClientTestSuite) TestDescribeAndUpdateScheduleActivity() {
+	dc := converter.GetDefaultDataConverter()
+	input, err := dc.ToPayloads("argument")
+	s.NoError(err)
+	header, err := dc.ToPayload("header-value")
+	s.NoError(err)
+	metadata, err := BuildUserMetadata("summary", "details", dc)
+	s.NoError(err)
+	action := &schedulepb.ScheduleAction{Action: &schedulepb.ScheduleAction_StartActivity{StartActivity: &schedulepb.StartActivityExecutionInfo{
+		ActivityId: "activity-id", ActivityType: &commonpb.ActivityType{Name: "activity-type"}, TaskQueue: &taskqueuepb.TaskQueue{Name: taskqueue},
+		StartToCloseTimeout: durationpb.New(time.Minute), Input: input, Header: &commonpb.Header{Fields: map[string]*commonpb.Payload{"header": header}},
+		UserMetadata: metadata, Priority: &commonpb.Priority{PriorityKey: 4}, StartDelay: durationpb.New(time.Second),
+	}}}
+	describeResponse := &workflowservice.DescribeScheduleResponse{Schedule: &schedulepb.Schedule{
+		Action: action, Spec: &schedulepb.ScheduleSpec{}, Policies: &schedulepb.SchedulePolicies{CustomOverlapPolicy: &schedulepb.CustomOverlapPolicy{Name: ScheduleOverlapPolicyBufferLatest}}, State: &schedulepb.ScheduleState{},
+	}, Info: &schedulepb.ScheduleInfo{ActionKind: enumspb.EXECUTION_TYPE_ACTIVITY, ActionType: "activity-type"}}
+	s.service.EXPECT().DescribeSchedule(gomock.Any(), gomock.Any(), gomock.Any()).Return(describeResponse, nil)
+	s.service.EXPECT().UpdateSchedule(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, request *workflowservice.UpdateScheduleRequest, _ ...any) (*workflowservice.UpdateScheduleResponse, error) {
+			updated := request.Schedule.Action.GetStartActivity()
+			s.Equal("activity-id", updated.GetActivityId())
+			s.Equal("activity-type", updated.GetActivityType().GetName())
+			s.Equal(ScheduleOverlapPolicyBufferLatest, request.Schedule.Policies.GetCustomOverlapPolicy().GetName())
+			s.Equal(header, updated.GetHeader().GetFields()["header"])
+			return &workflowservice.UpdateScheduleResponse{}, nil
+		})
+
+	err = s.client.ScheduleClient().GetHandle(context.Background(), scheduleID).Update(context.Background(), ScheduleUpdateOptions{DoUpdate: func(input ScheduleUpdateInput) (*ScheduleUpdate, error) {
+		activity, ok := input.Description.Schedule.Action.(*ScheduleActivityAction)
+		s.True(ok)
+		s.Equal("summary", activity.StaticSummary)
+		s.Equal("details", activity.StaticDetails)
+		s.Equal(time.Second, activity.StartDelay)
+		s.Equal(enumspb.EXECUTION_TYPE_ACTIVITY, input.Description.Info.ActionKind)
+		return &ScheduleUpdate{Schedule: &input.Description.Schedule}, nil
+	}})
+	s.NoError(err)
+}
+
+func (s *scheduleClientTestSuite) TestSerializeConflictingOverlapSelectors() {
+	policy := &SchedulePolicies{Overlap: enumspb.SCHEDULE_OVERLAP_POLICY_SKIP, CustomOverlapPolicy: "unknown.policy"}
+	pb, err := convertToPBSchedule(contextWithNewHeader(context.Background()), s.client.(*WorkflowClient), &Schedule{Action: &ScheduleActivityAction{Activity: "activity-type"}, Spec: &ScheduleSpec{}, Policy: policy, State: &ScheduleState{}})
+	s.NoError(err)
+	s.Equal(enumspb.SCHEDULE_OVERLAP_POLICY_SKIP, pb.Policies.GetOverlapPolicy())
+	s.Equal("unknown.policy", pb.Policies.GetCustomOverlapPolicy().GetName())
+}
+
+func (s *scheduleClientTestSuite) TestConvertScheduleActionResults() {
+	activityResult := &commonpb.ActionExecutionResult{
+		Execution: &commonpb.Execution{Type: enumspb.EXECUTION_TYPE_ACTIVITY, BusinessId: "activity-id", RunId: "run-id"},
+		Status:    &commonpb.ActionExecutionResult_ActivityStatus{ActivityStatus: enumspb.ACTIVITY_EXECUTION_STATUS_COMPLETED},
+	}
+	results := convertFromPBScheduleActionResultList([]*schedulepb.ScheduleActionResult{{ActionExecutionResult: activityResult}, {
+		StartWorkflowResult: &commonpb.WorkflowExecution{WorkflowId: "workflow-id", RunId: "workflow-run"},
+	}})
+	s.Equal(&ScheduleExecution{Kind: enumspb.EXECUTION_TYPE_ACTIVITY, ID: "activity-id", RunID: "run-id"}, results[0].Execution)
+	s.Equal(enumspb.ACTIVITY_EXECUTION_STATUS_COMPLETED, results[0].ActivityStatus)
+	s.True(results[0].CloseTime.IsZero())
+	s.Equal(&ScheduleExecution{Kind: enumspb.EXECUTION_TYPE_WORKFLOW, ID: "workflow-id", RunID: "workflow-run"}, results[1].Execution)
+}
+
+func (s *scheduleClientTestSuite) TestCustomOverlapPolicyOverrides() {
+	handle := s.client.ScheduleClient().GetHandle(context.Background(), scheduleID)
+	s.service.EXPECT().PatchSchedule(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, request *workflowservice.PatchScheduleRequest, _ ...any) (*workflowservice.PatchScheduleResponse, error) {
+			s.Equal(ScheduleOverlapPolicyBufferLatest, request.Patch.GetTriggerImmediately().GetCustomOverlapPolicy().GetName())
+			return &workflowservice.PatchScheduleResponse{}, nil
+		})
+	s.NoError(handle.Trigger(context.Background(), ScheduleTriggerOptions{CustomOverlapPolicy: ScheduleOverlapPolicyBufferLatest}))
+
+	s.service.EXPECT().PatchSchedule(gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(
+		func(_ context.Context, request *workflowservice.PatchScheduleRequest, _ ...any) (*workflowservice.PatchScheduleResponse, error) {
+			s.Equal(ScheduleOverlapPolicyBufferLatest, request.Patch.GetBackfillRequest()[0].GetCustomOverlapPolicy().GetName())
+			return &workflowservice.PatchScheduleResponse{}, nil
+		})
+	s.NoError(handle.Backfill(context.Background(), ScheduleBackfillOptions{Backfill: []ScheduleBackfill{{
+		Start: time.Now().Add(-time.Hour), End: time.Now(), CustomOverlapPolicy: ScheduleOverlapPolicyBufferLatest,
+	}}}))
 }
 
 func (s *scheduleClientTestSuite) SetupTest() {
