@@ -6336,6 +6336,39 @@ func (ts *IntegrationTestSuite) TestScheduleCreate() {
 	ts.Nil(description)
 }
 
+func (ts *IntegrationTestSuite) TestScheduleStandaloneActivity() {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	handle, err := ts.client.ScheduleClient().Create(ctx, client.ScheduleOptions{
+		ID:                 "test-schedule-standalone-activity",
+		Spec:               client.ScheduleSpec{},
+		Overlap:            enumspb.SCHEDULE_OVERLAP_POLICY_SKIP,
+		TriggerImmediately: true,
+		Action: &client.ScheduleActivityAction{
+			ID: "test-schedule-standalone-activity-action", Activity: ts.activities.EchoString,
+			Args: []any{"hello"}, TaskQueue: ts.taskQueueName, StartToCloseTimeout: 10 * time.Second,
+			StaticSummary: "scheduled standalone activity",
+		},
+	})
+	ts.NoError(err)
+	defer func() { ts.NoError(handle.Delete(context.Background())) }()
+
+	var description *client.ScheduleDescription
+	ts.Eventually(func() bool {
+		description, err = handle.Describe(ctx)
+		return err == nil && len(description.Info.RecentActions) == 1 &&
+			description.Info.RecentActions[0].ActivityStatus == enumspb.ACTIVITY_EXECUTION_STATUS_COMPLETED
+	}, 20*time.Second, 200*time.Millisecond)
+	action, ok := description.Schedule.Action.(*client.ScheduleActivityAction)
+	ts.True(ok)
+	ts.Equal("EchoString", action.Activity)
+	ts.Equal(enumspb.EXECUTION_TYPE_ACTIVITY, description.Info.ActionKind)
+	ts.Equal("EchoString", description.Info.ActionType)
+	ts.Equal(enumspb.EXECUTION_TYPE_ACTIVITY, description.Info.RecentActions[0].Execution.Kind)
+	ts.NotEmpty(description.Info.RecentActions[0].Execution.ID)
+	ts.False(description.Info.RecentActions[0].CloseTime.IsZero())
+}
+
 func (ts *IntegrationTestSuite) TestScheduleTypedSearchAttributes() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

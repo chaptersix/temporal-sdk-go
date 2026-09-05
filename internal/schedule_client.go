@@ -88,6 +88,9 @@ type (
 
 		// Overlap - Override the Overlap Policy for this request.
 		Overlap enumspb.ScheduleOverlapPolicy
+
+		// CustomOverlapPolicy names a registered policy to use instead of Overlap.
+		CustomOverlapPolicy string
 	}
 
 	// ScheduleIntervalSpec - matches times that can be expressed as:
@@ -309,6 +312,44 @@ type (
 		Priority Priority
 	}
 
+	// ScheduleActivityAction implements ScheduleAction to launch a standalone activity.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.ScheduleActivityAction]
+	ScheduleActivityAction struct {
+		// ID is the base business identifier of the activity execution.
+		ID string
+		// Activity is the activity function or registered type name.
+		Activity any
+		// Args are arguments passed to the activity.
+		Args []any
+		// TaskQueue is the activity task queue.
+		TaskQueue string
+		// ScheduleToCloseTimeout limits the total activity execution time, including retries.
+		ScheduleToCloseTimeout time.Duration
+		// ScheduleToStartTimeout limits how long an activity task may wait in the task queue.
+		ScheduleToStartTimeout time.Duration
+		// StartToCloseTimeout limits a single activity attempt.
+		StartToCloseTimeout time.Duration
+		// HeartbeatTimeout limits the interval between activity heartbeats.
+		HeartbeatTimeout time.Duration
+		// RetryPolicy controls activity execution retries.
+		RetryPolicy *RetryPolicy
+		// Header contains context propagation and tracing values.
+		Header *commonpb.Header
+		// TypedSearchAttributes are indexed values attached to each activity execution.
+		TypedSearchAttributes SearchAttributes
+		// UntypedSearchAttributes preserves attributes from older described schedules.
+		UntypedSearchAttributes map[string]*commonpb.Payload
+		// StaticSummary is fixed single-line activity metadata.
+		StaticSummary string
+		// StaticDetails is fixed activity metadata that may span multiple lines.
+		StaticDetails string
+		// Priority controls relative activity task processing order.
+		Priority Priority
+		// StartDelay delays dispatch of the first activity attempt.
+		StartDelay time.Duration
+	}
+
 	// ScheduleOptions configure the parameters for creating a schedule.
 	//
 	// Exposed as: [go.temporal.io/sdk/client.ScheduleOptions]
@@ -328,6 +369,9 @@ type (
 		//
 		// Optional: defaulted to SCHEDULE_OVERLAP_POLICY_SKIP
 		Overlap enumspb.ScheduleOverlapPolicy
+
+		// CustomOverlapPolicy names a registered policy to use instead of Overlap.
+		CustomOverlapPolicy string
 
 		// CatchupWindow - The Temporal Server might be down or unavailable at the time when a Schedule should take an Action.
 		// When the Server comes back up, CatchupWindow controls which missed Actions should be taken at that point. The default is one
@@ -426,6 +470,14 @@ type (
 		// more than one if the overlap policy allows overlaps.)
 		RunningWorkflows []ScheduleWorkflowExecution
 
+		// RunningExecutions contains all tracked workflow and standalone activity executions.
+		RunningExecutions []ScheduleExecution
+
+		// ActionKind identifies whether the schedule starts workflows or standalone activities.
+		ActionKind enumspb.ExecutionType
+		// ActionType is the registered workflow or activity type.
+		ActionType string
+
 		// RecentActions- Most recent 10 Actions started (including manual triggers).
 		//
 		// Sorted from older start time to newer.
@@ -476,6 +528,9 @@ type (
 		// Overlap - Controls what happens when an Action would be started by a Schedule at the same time that an older Action is still
 		// running.
 		Overlap enumspb.ScheduleOverlapPolicy
+
+		// CustomOverlapPolicy names a registered policy to use instead of Overlap.
+		CustomOverlapPolicy string
 
 		// CatchupWindow - The Temporal Server might be down or unavailable at the time when a Schedule should take an Action. When the Server
 		// comes back up, CatchupWindow controls which missed Actions should be taken at that point.
@@ -564,6 +619,9 @@ type (
 	ScheduleTriggerOptions struct {
 		// Overlap - If specified, policy to override the schedules default overlap policy.
 		Overlap enumspb.ScheduleOverlapPolicy
+
+		// CustomOverlapPolicy names a registered policy to use instead of Overlap.
+		CustomOverlapPolicy string
 	}
 
 	// SchedulePauseOptions configure the parameters for pausing a schedule.
@@ -638,9 +696,31 @@ type (
 		// ActualTime - Time that the Action was actually taken.
 		ActualTime time.Time
 
+		// CloseTime is when the execution reached a terminal status, if known.
+		CloseTime time.Time
+
 		// StartWorkflowResult - If action was ScheduleWorkflowAction, returns the
 		// ID of the workflow.
 		StartWorkflowResult *ScheduleWorkflowExecution
+
+		// Execution identifies the workflow or standalone activity started by the action.
+		Execution *ScheduleExecution
+		// WorkflowStatus is set for workflow actions.
+		WorkflowStatus enumspb.WorkflowExecutionStatus
+		// ActivityStatus is set for standalone activity actions.
+		ActivityStatus enumspb.ActivityExecutionStatus
+	}
+
+	// ScheduleExecution identifies an execution started by a schedule.
+	//
+	// Exposed as: [go.temporal.io/sdk/client.ScheduleExecution]
+	ScheduleExecution struct {
+		// Kind identifies a workflow or standalone activity execution.
+		Kind enumspb.ExecutionType
+		// ID is the execution's business identifier.
+		ID string
+		// RunID identifies the particular execution run.
+		RunID string
 	}
 
 	// ScheduleListEntry
@@ -664,6 +744,13 @@ type (
 		// WorkflowType - If the schedule action is a Wokrflow then
 		// describes what workflow is run.
 		WorkflowType WorkflowType
+
+		// ActionKind identifies whether the schedule starts workflows or standalone activities.
+		ActionKind enumspb.ExecutionType
+		// ActionType is the registered workflow or activity type.
+		ActionType string
+		// RunningExecutionCount is the number of tracked running executions.
+		RunningExecutionCount int
 
 		// RecentActions- Most recent 5 Actions started (including manual triggers).
 		//
@@ -732,3 +819,11 @@ type (
 
 func (*ScheduleWorkflowAction) isScheduleAction() {
 }
+
+func (*ScheduleActivityAction) isScheduleAction() {
+}
+
+// ScheduleOverlapPolicyBufferLatest is the registered name of the buffer-latest overlap policy.
+//
+// Exposed as: [go.temporal.io/sdk/client.ScheduleOverlapPolicyBufferLatest]
+const ScheduleOverlapPolicyBufferLatest = "temporal.buffer_latest"

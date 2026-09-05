@@ -21,6 +21,9 @@ import (
 	"go.temporal.io/sdk/internal/common/metrics"
 )
 
+// ScheduleOverlapPolicyBufferLatest is the registered name of the buffer-latest overlap policy.
+const ScheduleOverlapPolicyBufferLatest = internal.ScheduleOverlapPolicyBufferLatest
+
 // DeploymentReachability specifies which category of tasks may reach a worker
 // associated with a deployment, simplifying safe decommission.
 //
@@ -341,6 +344,12 @@ type (
 
 	// ScheduleWorkflowAction is the implementation of ScheduleAction to start a workflow.
 	ScheduleWorkflowAction = internal.ScheduleWorkflowAction
+
+	// ScheduleActivityAction starts a standalone activity from a schedule.
+	ScheduleActivityAction = internal.ScheduleActivityAction
+
+	// ScheduleExecution identifies an execution started by a schedule.
+	ScheduleExecution = internal.ScheduleExecution
 
 	// ScheduleOptions configuration parameters for creating a schedule.
 	ScheduleOptions = internal.ScheduleOptions

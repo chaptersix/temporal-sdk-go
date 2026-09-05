@@ -25,6 +25,7 @@ func (WorkflowSerializationContext) isSerializationContext() {}
 // This includes: activity input/result, heartbeat details, and activity failure details.
 type ActivitySerializationContext struct {
 	Namespace    string
+	ActivityID   string
 	WorkflowID   string
 	WorkflowType string
 	ActivityType string

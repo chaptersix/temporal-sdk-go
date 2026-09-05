@@ -86,7 +86,8 @@ func (w *workflowClientInterceptor) CreateSchedule(ctx context.Context, in *Sche
 	var triggerImmediately *schedulepb.TriggerImmediatelyRequest
 	if in.Options.TriggerImmediately {
 		triggerImmediately = &schedulepb.TriggerImmediatelyRequest{
-			OverlapPolicy: in.Options.Overlap,
+			OverlapPolicy:       in.Options.Overlap,
+			CustomOverlapPolicy: customOverlapPolicyToPB(in.Options.CustomOverlapPolicy),
 		}
 	}
 
@@ -116,9 +117,10 @@ func (w *workflowClientInterceptor) CreateSchedule(ctx context.Context, in *Sche
 			Spec:   convertToPBScheduleSpec(&in.Options.Spec),
 			Action: action,
 			Policies: &schedulepb.SchedulePolicies{
-				OverlapPolicy:  in.Options.Overlap,
-				CatchupWindow:  catchupWindow,
-				PauseOnFailure: in.Options.PauseOnFailure,
+				OverlapPolicy:       in.Options.Overlap,
+				CustomOverlapPolicy: customOverlapPolicyToPB(in.Options.CustomOverlapPolicy),
+				CatchupWindow:       catchupWindow,
+				PauseOnFailure:      in.Options.PauseOnFailure,
 			},
 			State: &schedulepb.ScheduleState{
 				Notes:            in.Options.Note,
@@ -133,11 +135,13 @@ func (w *workflowClientInterceptor) CreateSchedule(ctx context.Context, in *Sche
 		SearchAttributes: searchAttr,
 	}
 
-	storeCtx := extstore.WithStorageTarget(ctx, extstore.StorageDriverWorkflowInfo{
-		Namespace:    w.client.namespace,
-		WorkflowID:   action.GetStartWorkflow().GetWorkflowId(),
-		WorkflowType: action.GetStartWorkflow().GetWorkflowType().GetName(),
-	})
+	var storageTarget extstore.StorageDriverTargetInfo
+	if workflow := action.GetStartWorkflow(); workflow != nil {
+		storageTarget = extstore.StorageDriverWorkflowInfo{Namespace: w.client.namespace, WorkflowID: workflow.GetWorkflowId(), WorkflowType: workflow.GetWorkflowType().GetName()}
+	} else if activity := action.GetStartActivity(); activity != nil {
+		storageTarget = extstore.StorageDriverActivityInfo{Namespace: w.client.namespace, ActivityID: activity.GetActivityId(), ActivityType: activity.GetActivityType().GetName()}
+	}
+	storeCtx := extstore.WithStorageTarget(ctx, storageTarget)
 	if err := visitProtoPayloads(storeCtx, w.outboundPayloadVisitor, startRequest, 0); err != nil {
 		return nil, err
 	}
@@ -306,11 +310,7 @@ func (scheduleHandle *scheduleHandleImpl) Update(ctx context.Context, options Sc
 		SearchAttributes: newSA,
 	}
 
-	storeCtx := extstore.WithStorageTarget(ctx, extstore.StorageDriverWorkflowInfo{
-		Namespace:    scheduleHandle.client.namespace,
-		WorkflowID:   newSchedulePB.GetAction().GetStartWorkflow().GetWorkflowId(),
-		WorkflowType: newSchedulePB.GetAction().GetStartWorkflow().GetWorkflowType().GetName(),
-	})
+	storeCtx := extstore.WithStorageTarget(ctx, scheduleActionStorageTarget(scheduleHandle.client.namespace, newSchedulePB.GetAction()))
 
 	if err := visitProtoPayloads(storeCtx, scheduleHandle.outboundPayloadVisitor, updateRequest, 0); err != nil {
 		return err
@@ -341,7 +341,8 @@ func (scheduleHandle *scheduleHandleImpl) Trigger(ctx context.Context, options S
 		ScheduleId: scheduleHandle.ID,
 		Patch: &schedulepb.SchedulePatch{
 			TriggerImmediately: &schedulepb.TriggerImmediatelyRequest{
-				OverlapPolicy: options.Overlap,
+				OverlapPolicy:       options.Overlap,
+				CustomOverlapPolicy: customOverlapPolicyToPB(options.CustomOverlapPolicy),
 			},
 		},
 		Identity:  scheduleHandle.client.identity,
@@ -513,9 +514,10 @@ func scheduleDescriptionFromPB(
 			Action: actionDescription,
 			Spec:   convertFromPBScheduleSpec(describeResponse.Schedule.Spec),
 			Policy: &SchedulePolicies{
-				Overlap:        describeResponse.Schedule.Policies.GetOverlapPolicy(),
-				CatchupWindow:  describeResponse.Schedule.Policies.GetCatchupWindow().AsDuration(),
-				PauseOnFailure: describeResponse.Schedule.Policies.GetPauseOnFailure(),
+				Overlap:             describeResponse.Schedule.Policies.GetOverlapPolicy(),
+				CustomOverlapPolicy: describeResponse.Schedule.Policies.GetCustomOverlapPolicy().GetName(),
+				CatchupWindow:       describeResponse.Schedule.Policies.GetCatchupWindow().AsDuration(),
+				PauseOnFailure:      describeResponse.Schedule.Policies.GetPauseOnFailure(),
 			},
 			State: &ScheduleState{
 				Note:             describeResponse.Schedule.State.GetNotes(),
@@ -529,6 +531,9 @@ func scheduleDescriptionFromPB(
 			NumActionsMissedCatchupWindow: int(describeResponse.Info.MissedCatchupWindow),
 			NumActionsSkippedOverlap:      int(describeResponse.Info.OverlapSkipped),
 			RunningWorkflows:              runningWorkflows,
+			RunningExecutions:             convertFromPBExecutions(describeResponse.Info.GetRunningExecutions()),
+			ActionKind:                    describeResponse.Info.GetActionKind(),
+			ActionType:                    describeResponse.Info.GetActionType(),
 			RecentActions:                 recentActions,
 			NextActionTimes:               nextActionTimes,
 			CreatedAt:                     describeResponse.Info.GetCreateTime().AsTime(),
@@ -559,9 +564,10 @@ func convertToPBSchedule(ctx context.Context, client *WorkflowClient, schedule *
 		Spec:   convertToPBScheduleSpec(schedule.Spec),
 		Action: action,
 		Policies: &schedulepb.SchedulePolicies{
-			OverlapPolicy:  schedule.Policy.Overlap,
-			CatchupWindow:  catchupWindow,
-			PauseOnFailure: schedule.Policy.PauseOnFailure,
+			OverlapPolicy:       schedule.Policy.Overlap,
+			CustomOverlapPolicy: customOverlapPolicyToPB(schedule.Policy.CustomOverlapPolicy),
+			CatchupWindow:       catchupWindow,
+			PauseOnFailure:      schedule.Policy.PauseOnFailure,
 		},
 		State: &schedulepb.ScheduleState{
 			Notes:            schedule.State.Note,
@@ -590,10 +596,13 @@ func convertFromPBScheduleListEntry(schedule *schedulepb.ScheduleListEntry) *Sch
 		WorkflowType: WorkflowType{
 			Name: scheduleInfo.GetWorkflowType().GetName(),
 		},
-		RecentActions:    recentActions,
-		NextActionTimes:  nextActionTimes,
-		Memo:             schedule.Memo,
-		SearchAttributes: schedule.SearchAttributes,
+		ActionKind:            scheduleInfo.GetActionKind(),
+		ActionType:            scheduleInfo.GetActionType(),
+		RunningExecutionCount: int(scheduleInfo.GetRunningExecutionCount()),
+		RecentActions:         recentActions,
+		NextActionTimes:       nextActionTimes,
+		Memo:                  schedule.Memo,
+		SearchAttributes:      schedule.SearchAttributes,
 	}
 }
 
@@ -681,6 +690,64 @@ func convertToPBScheduleAction(
 				},
 			},
 		}, nil
+	case *ScheduleActivityAction:
+		dataConverter := WithContext(ctx, client.dataConverter)
+		if action.ID == "" {
+			action.ID = uuid.NewString()
+		}
+		activityType := getActivityFunctionName(client.registry, action.Activity)
+		if activityType == "" {
+			return nil, fmt.Errorf("activity must be a function or type name")
+		}
+		if err := validateFunctionArgs(action.Activity, action.Args, false); err != nil {
+			return nil, err
+		}
+		dataConverter = converter.WithDataConverterSerializationContext(dataConverter, converter.ActivitySerializationContext{
+			Namespace: client.namespace, ActivityID: action.ID, ActivityType: activityType, TaskQueue: action.TaskQueue,
+		})
+		input, err := encodeScheduleWorklowArgs(dataConverter, action.Args)
+		if err != nil {
+			return nil, err
+		}
+		searchAttrs, err := SerializeSearchAttributes(nil, action.TypedSearchAttributes)
+		if err != nil {
+			return nil, err
+		}
+		for k, v := range action.UntypedSearchAttributes {
+			if searchAttrs.GetIndexedFields()[k] == nil {
+				if searchAttrs == nil || searchAttrs.IndexedFields == nil {
+					searchAttrs = &commonpb.SearchAttributes{IndexedFields: map[string]*commonpb.Payload{}}
+				}
+				searchAttrs.IndexedFields[k] = v
+			}
+		}
+		header, err := headerPropagated(ctx, client.contextPropagators)
+		if err != nil {
+			return nil, err
+		}
+		if action.Header != nil {
+			if header == nil {
+				header = &commonpb.Header{}
+			}
+			if header.Fields == nil {
+				header.Fields = map[string]*commonpb.Payload{}
+			}
+			for key, value := range action.Header.Fields {
+				header.Fields[key] = value
+			}
+		}
+		userMetadata, err := BuildUserMetadata(action.StaticSummary, action.StaticDetails, dataConverter)
+		if err != nil {
+			return nil, err
+		}
+		return &schedulepb.ScheduleAction{Action: &schedulepb.ScheduleAction_StartActivity{StartActivity: &schedulepb.StartActivityExecutionInfo{
+			ActivityId: action.ID, ActivityType: &commonpb.ActivityType{Name: activityType},
+			TaskQueue:              &taskqueuepb.TaskQueue{Name: action.TaskQueue, Kind: enumspb.TASK_QUEUE_KIND_NORMAL},
+			ScheduleToCloseTimeout: durationpb.New(action.ScheduleToCloseTimeout), ScheduleToStartTimeout: durationpb.New(action.ScheduleToStartTimeout),
+			StartToCloseTimeout: durationpb.New(action.StartToCloseTimeout), HeartbeatTimeout: durationpb.New(action.HeartbeatTimeout),
+			RetryPolicy: ConvertToPBRetryPolicy(action.RetryPolicy), Input: input, SearchAttributes: searchAttrs, Header: header,
+			UserMetadata: userMetadata, Priority: ConvertToPBPriority(action.Priority), StartDelay: durationpb.New(action.StartDelay),
+		}}}, nil
 	default:
 		// TODO maybe just panic instead?
 		return nil, fmt.Errorf("could not parse ScheduleAction")
@@ -762,6 +829,34 @@ func convertFromPBScheduleAction(
 			StaticDetails:            *convertedDetails,
 			Priority:                 convertFromPBPriority(workflow.GetPriority()),
 		}, nil
+	case *schedulepb.ScheduleAction_StartActivity:
+		activity := action.StartActivity
+		dc = converter.WithDataConverterSerializationContext(dc, converter.ActivitySerializationContext{
+			Namespace: namespace, ActivityID: activity.GetActivityId(), ActivityType: activity.GetActivityType().GetName(), TaskQueue: activity.GetTaskQueue().GetName(),
+		})
+		args := make([]any, len(activity.GetInput().GetPayloads()))
+		for i, payload := range activity.GetInput().GetPayloads() {
+			args[i] = payload
+		}
+		var summary, details string
+		if metadata := activity.GetUserMetadata(); metadata != nil {
+			if metadata.GetSummary() != nil {
+				if err := dc.FromPayload(metadata.GetSummary(), &summary); err != nil {
+					return nil, fmt.Errorf("could not decode user metadata summary: %w", err)
+				}
+			}
+			if metadata.GetDetails() != nil {
+				if err := dc.FromPayload(metadata.GetDetails(), &details); err != nil {
+					return nil, fmt.Errorf("could not decode user metadata details: %w", err)
+				}
+			}
+		}
+		return &ScheduleActivityAction{ID: activity.GetActivityId(), Activity: activity.GetActivityType().GetName(), Args: args, TaskQueue: activity.GetTaskQueue().GetName(),
+			ScheduleToCloseTimeout: activity.GetScheduleToCloseTimeout().AsDuration(), ScheduleToStartTimeout: activity.GetScheduleToStartTimeout().AsDuration(),
+			StartToCloseTimeout: activity.GetStartToCloseTimeout().AsDuration(), HeartbeatTimeout: activity.GetHeartbeatTimeout().AsDuration(), RetryPolicy: convertFromPBRetryPolicy(activity.GetRetryPolicy()),
+			Header: activity.GetHeader(), TypedSearchAttributes: convertToTypedSearchAttributes(logger, activity.GetSearchAttributes().GetIndexedFields()),
+			UntypedSearchAttributes: activity.GetSearchAttributes().GetIndexedFields(), StaticSummary: summary, StaticDetails: details,
+			Priority: convertFromPBPriority(activity.GetPriority()), StartDelay: activity.GetStartDelay().AsDuration()}, nil
 	default:
 		// TODO maybe just panic instead?
 		return nil, fmt.Errorf("could not parse ScheduleAction")
@@ -773,9 +868,10 @@ func convertToPBBackfillList(backfillRequests []ScheduleBackfill) []*schedulepb.
 	for i, b := range backfillRequests {
 		backfill := b
 		backfillRequestsPB[i] = &schedulepb.BackfillRequest{
-			StartTime:     timestamppb.New(backfill.Start),
-			EndTime:       timestamppb.New(backfill.End),
-			OverlapPolicy: backfill.Overlap,
+			StartTime:           timestamppb.New(backfill.Start),
+			EndTime:             timestamppb.New(backfill.End),
+			OverlapPolicy:       backfill.Overlap,
+			CustomOverlapPolicy: customOverlapPolicyToPB(backfill.CustomOverlapPolicy),
 		}
 	}
 	return backfillRequestsPB
@@ -880,13 +976,61 @@ func convertFromPBScheduleActionResultList(aa []*schedulepb.ScheduleActionResult
 				FirstExecutionRunID: a.GetStartWorkflowResult().GetRunId(),
 			}
 		}
+		executionResult := a.GetActionExecutionResult()
+		var execution *ScheduleExecution
+		if executionResult.GetExecution() != nil {
+			execution = convertFromPBExecution(executionResult.GetExecution())
+		} else if workflowExecution != nil {
+			execution = &ScheduleExecution{Kind: enumspb.EXECUTION_TYPE_WORKFLOW, ID: workflowExecution.WorkflowID, RunID: workflowExecution.FirstExecutionRunID}
+		}
 		recentActions[i] = ScheduleActionResult{
 			ScheduleTime:        a.GetScheduleTime().AsTime(),
 			ActualTime:          a.GetActualTime().AsTime(),
+			CloseTime:           timestampToTime(a.GetCloseTime()),
 			StartWorkflowResult: workflowExecution,
+			Execution:           execution,
+			WorkflowStatus:      executionResult.GetWorkflowStatus(),
+			ActivityStatus:      executionResult.GetActivityStatus(),
 		}
 	}
 	return recentActions
+}
+
+func customOverlapPolicyToPB(name string) *schedulepb.CustomOverlapPolicy {
+	if name == "" {
+		return nil
+	}
+	return &schedulepb.CustomOverlapPolicy{Name: name}
+}
+
+func timestampToTime(timestamp *timestamppb.Timestamp) time.Time {
+	if timestamp == nil {
+		return time.Time{}
+	}
+	return timestamp.AsTime()
+}
+
+func scheduleActionStorageTarget(namespace string, action *schedulepb.ScheduleAction) extstore.StorageDriverTargetInfo {
+	if workflow := action.GetStartWorkflow(); workflow != nil {
+		return extstore.StorageDriverWorkflowInfo{Namespace: namespace, WorkflowID: workflow.GetWorkflowId(), WorkflowType: workflow.GetWorkflowType().GetName()}
+	}
+	activity := action.GetStartActivity()
+	return extstore.StorageDriverActivityInfo{Namespace: namespace, ActivityID: activity.GetActivityId(), ActivityType: activity.GetActivityType().GetName()}
+}
+
+func convertFromPBExecution(execution *commonpb.Execution) *ScheduleExecution {
+	if execution == nil {
+		return nil
+	}
+	return &ScheduleExecution{Kind: execution.GetType(), ID: execution.GetBusinessId(), RunID: execution.GetRunId()}
+}
+
+func convertFromPBExecutions(executions []*commonpb.Execution) []ScheduleExecution {
+	result := make([]ScheduleExecution, len(executions))
+	for i, execution := range executions {
+		result[i] = *convertFromPBExecution(execution)
+	}
+	return result
 }
 
 func encodeScheduleWorklowArgs(dc converter.DataConverter, args []any) (*commonpb.Payloads, error) {
